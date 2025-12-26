@@ -1,9 +1,11 @@
 'use strict';
 
 /**
- * Website Tab Sorter
+ * Website Tab Sorter (Invariant)
  * - Sorts pinned tabs independently
- * - Groups by hostname+port (URL.host without leading "www.")
+ * - Groups by host+port (URL.host without leading "www.")
+ * - chrome-extension:// tabs grouped as ext:<extension-id>
+ * - Internal pages clustered under "internal"
  * - Within host: sorts by URL components (host + path + search + hash)
  * - Moves tab groups left, ordered by title (descending)
  */
@@ -17,7 +19,7 @@ chrome.action.onClicked.addListener(() => {
 async function sortAllTabs() {
   const { id: windowId } = await chrome.windows.getLastFocused();
 
-  // 1) Pinned tabs (own universe)
+  /* ========= 1) PINNED TABS ========= */
   const pinnedTabs = await chrome.tabs.query({ windowId, pinned: true });
   let nextPosition = pinnedTabs.length;
 
@@ -28,29 +30,25 @@ async function sortAllTabs() {
     );
   }
 
-  // 2) Tab groups (title DESC)
+  /* ========= 2) TAB GROUPS ========= */
   const tabGroups = await chrome.tabGroups.query({ windowId });
-  if (tabGroups.length) {
-    tabGroups.sort((a, b) =>
-      (b.title || "").localeCompare(a.title || "")
-    );
+  tabGroups.sort((a, b) => (b.title || "").localeCompare(a.title || ""));
 
-    for (const group of tabGroups) {
-      await chrome.tabGroups.move(group.id, { index: nextPosition });
+  for (const group of tabGroups) {
+    await chrome.tabGroups.move(group.id, { index: nextPosition });
 
-      const tabs = await chrome.tabs.query({
-        windowId,
-        groupId: group.id
-      });
+    const tabs = await chrome.tabs.query({
+      windowId,
+      groupId: group.id
+    });
 
-      if (tabs.length) {
-        await sortTabsScope(tabs, minIndex(tabs), group.id);
-        nextPosition += tabs.length;
-      }
+    if (tabs.length) {
+      await sortTabsScope(tabs, minIndex(tabs), group.id);
+      nextPosition += tabs.length;
     }
   }
 
-  // 3) Ungrouped, unpinned
+  /* ========= 3) UNGROUPED / UNPINNED ========= */
   const ungroupedTabs = await chrome.tabs.query({
     windowId,
     pinned: false,
@@ -58,40 +56,51 @@ async function sortAllTabs() {
   });
 
   if (ungroupedTabs.length) {
-    await sortTabsScope(
-      ungroupedTabs,
-      minIndex(ungroupedTabs),
-      -1
-    );
+    await sortTabsScope(ungroupedTabs, minIndex(ungroupedTabs), -1);
   }
 }
 
+/* =========================
+   SORT ONE SCOPE
+   ========================= */
 async function sortTabsScope(tabs, startIndex, groupId) {
-  if (!tabs || !tabs.length) return;
+  if (!tabs.length) return;
 
   const decorated = tabs.map((tab, originalIndex) => {
     const url = resolveTabUrl(tab);
-    const cleanHost = url.host.replace(WWW_RE, "").toLowerCase();
+
+    const hostKey =
+      url.protocol === "chrome-extension:"
+        ? `ext:${url.host}`                         // 👈 extension ID bucket
+        : url.protocol === "http:" || url.protocol === "https:"
+          ? url.host.replace(WWW_RE, "").toLowerCase()
+          : "internal";
+
+    const sortKey =
+      hostKey +
+      url.pathname +
+      url.search +
+      url.hash;
 
     return {
       id: tab.id,
       originalIndex,
-      hostname: cleanHost,
-      key: cleanHost + url.pathname + url.search + url.hash
+      hostKey,
+      sortKey
     };
   });
 
   decorated.sort((a, b) => {
-    const hostCmp = a.hostname.localeCompare(b.hostname);
-    if (hostCmp) return hostCmp;
+    const h = a.hostKey.localeCompare(b.hostKey);
+    if (h !== 0) return h;
 
-    const keyCmp = a.key.localeCompare(b.key);
-    if (keyCmp) return keyCmp;
+    const k = a.sortKey.localeCompare(b.sortKey);
+    if (k !== 0) return k;
 
     return a.originalIndex - b.originalIndex;
   });
 
-  const sortedIds = decorated.map(x => x.id);
+  const sortedIds = decorated.map(t => t.id);
   await chrome.tabs.move(sortedIds, { index: startIndex });
 
   if (groupId > -1) {
@@ -99,8 +108,26 @@ async function sortTabsScope(tabs, startIndex, groupId) {
   }
 }
 
+/* =========================
+   URL RESOLUTION
+   ========================= */
 function resolveTabUrl(tab) {
   const raw = tab.pendingUrl || tab.url;
+
+  // chrome-extension pages
+  if (raw.startsWith("chrome-extension://")) {
+    return new URL(raw);
+  }
+
+  // internal browser pages
+  if (
+    raw.startsWith("chrome://") ||
+    raw.startsWith("about:") ||
+    raw.startsWith("edge://") ||
+    raw.startsWith("brave://")
+  ) {
+    return new URL("http://internal/" + encodeURIComponent(raw));
+  }
 
   try {
     return new URL(raw);
@@ -109,10 +136,13 @@ function resolveTabUrl(tab) {
   }
 }
 
+/* =========================
+   HELPERS
+   ========================= */
 function minIndex(tabs) {
-  let m = tabs[0].index;
+  let min = tabs[0].index;
   for (let i = 1; i < tabs.length; i++) {
-    if (tabs[i].index < m) m = tabs[i].index;
+    if (tabs[i].index < min) min = tabs[i].index;
   }
-  return m;
+  return min;
 }
