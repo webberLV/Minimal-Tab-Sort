@@ -1,9 +1,10 @@
 {
   "manifest_version": 3,
-  "name": "Minimal Tab Sort",
+  "name": "Minimal Tab Sorter",
   "version": "1.0.0",
   "author": "Webber",
   "description": "Sort tabs by website domain, preserving pinned tabs and tab groups.",
+  "homepage_url": "https://github.com/webberLV/Minimal-Tab-Sort",
   "permissions": ["tabs", "tabGroups"],
   "background": {
     "service_worker": "background.js",
